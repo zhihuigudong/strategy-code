@@ -1,0 +1,118 @@
+# 导入函数库
+from jqdata import *
+import pandas as pd
+from six import BytesIO
+
+# 初始化函数，设定基准等等
+def initialize(context):
+    # 设定沪深300作为基准
+    set_benchmark('000300.XSHG')
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+    
+    # 过滤掉order系列API产生的比error级别低的log
+    # log.set_level('order', 'error')
+    
+    ### 股票相关设定 ###
+    # 股票类每笔交易时的手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+    
+    ## 运行函数（reference_security为运行时间的参考标的；传入的标的只做种类区分，因此传入'000300.XSHG'或'510300.XSHG'是一样的）
+      # 开盘前运行
+    run_daily(before_market_open, time='before_open', reference_security='000300.XSHG') 
+      # 开盘时或每分钟开始时运行
+    run_daily(market_open, time='every_bar', reference_security='000300.XSHG')
+      # 收盘后运行
+    run_daily(after_market_close, time='after_close', reference_security='000300.XSHG')
+    # 全局变量
+    g.longday_pb50=0
+    g.longday_EARNS=0
+    g.buy=False
+    base = read_file('HS30EARNS.csv')
+    g.f = pd.read_csv(BytesIO(base))
+    
+## 开盘前运行函数     
+def before_market_open(context):
+    pass
+    
+## 开盘时运行函数
+def market_open(context):
+    # 先算PB50，因为每天都要判断
+    yesterday = context.previous_date
+
+    while True:
+        if g.longday_pb50 != 0:
+            break
+        else:
+            sl = get_index_stocks('000300.XSHG',date=yesterday)
+            q = query(valuation.pb_ratio).filter(valuation.code.in_(sl))
+            df = get_fundamentals(q,date=yesterday)
+            pb = df.quantile(0.5)[0]
+            if pb < 1.68:
+                g.longday_pb50 = 120
+                g.longday_EARNS = 0
+                g.buy = False
+                break
+            else:
+                base = attribute_history('000300.XSHG',140,'1d',['close'])
+                MA120 = base['close'][-120:].mean()
+                MA40 = base['close'][-40:].mean()
+                MA20 = base['close'][-20:].mean()
+                MA5 = base['close'][-5:].mean()
+                close = base['close'][-1]
+                if AAA(close, MA5, MA20, MA40, MA120) >= 1:
+                    g.buy = True
+                    break
+                elif AAA(close, MA5, MA20, MA40, MA120) <= 0.4:
+                    g.buy = False
+                    g.longday_EARNS = 0
+                    break
+                else:
+                    try:
+                        i = g.f[g.f['Unnamed: 0']==str(yesterday)].index.tolist()[0]
+                    except:
+                        EARNS = 1000000000
+                    else:
+                        EARNS = g.f['factor_MA60'][i]
+                    if EARNS < 1000000000:
+                        g.longday_EARNS = 40
+                        break
+                    else:
+                        break
+
+    if g.longday_pb50 != 0:
+        order_target_value('000300.XSHG',context.portfolio.total_value)
+        g.longday_pb50 -=1
+    elif g.buy:
+        order_target_value('000300.XSHG',context.portfolio.total_value)
+        if g.longday_EARNS != 0:
+            g.longday_EARNS -=1
+    elif g.longday_EARNS != 0:
+        order_target_value('000300.XSHG',context.portfolio.total_value)
+        g.longday_EARNS -=1
+    else:
+        order_target_value('000300.XSHG',0)
+
+## 收盘后运行函数  
+def after_market_close(context):
+    pass
+
+def AAA(close, MA5, MA20, MA40, MA120):
+    result = 0
+    if MA5 > close:
+        result = result - 0.1
+    else:
+        result = result + 0.1
+    if MA20 > close:
+        result = result - 0.2
+    else:
+        result = result + 0.2
+    if MA40 > close:
+        result = result - 0.5
+    else:
+        result = result + 0.5
+    if MA120 > close:
+        result = result - 0.8
+    else:
+        result = result + 0.8
+    return result
